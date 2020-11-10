@@ -280,13 +280,14 @@ class DLRM_Net(nn.Module):
         #   corresponding to a single lookup
         # 2. for each embedding the lookups are further organized into a batch
         # 3. for a list of embedding tables there is a list of batched lookups
-
         ly = []
         # for k, sparse_index_group_batch in enumerate(lS_i):
         for k in range(len(lS_i)):
             sparse_index_group_batch = lS_i[k]
             sparse_offset_group_batch = lS_o[k]
 
+            if args.enable_memory_profiling:
+                print(f'TABLE {k} [{emb_l[k].num_embeddings} entries, {next(emb_l.parameters()).device}] <- READ', sparse_index_group_batch.detach().cpu().numpy())
             # embedding lookup
             # We are using EmbeddingBag, which implicitly uses sum operator.
             # The embeddings are represented as tall matrices, with sum
@@ -295,7 +296,7 @@ class DLRM_Net(nn.Module):
             V = E(sparse_index_group_batch, sparse_offset_group_batch)
 
             ly.append(V)
-
+        
         # print(ly)
         return ly
 
@@ -596,6 +597,9 @@ if __name__ == "__main__":
     parser.add_argument("--lr-num-warmup-steps", type=int, default=0)
     parser.add_argument("--lr-decay-start-step", type=int, default=0)
     parser.add_argument("--lr-num-decay-steps", type=int, default=0)
+
+    # My commands
+    parser.add_argument("--enable-memory-profiling", action="store_true", default=False)
     args = parser.parse_args()
 
     if args.mlperf_logging:
@@ -615,6 +619,7 @@ if __name__ == "__main__":
         args.test_num_workers = args.num_workers
 
     use_gpu = args.use_gpu and torch.cuda.is_available()
+
     if use_gpu:
         torch.cuda.manual_seed_all(args.numpy_rand_seed)
         torch.backends.cudnn.deterministic = True
@@ -984,7 +989,6 @@ if __name__ == "__main__":
                 print([S_i.detach().cpu().numpy().tolist() for S_i in lS_i])
                 print(T.detach().cpu().numpy())
                 '''
-
                 # forward pass
                 Z = dlrm_wrap(X, lS_o, lS_i, use_gpu, device)
 
@@ -1036,7 +1040,7 @@ if __name__ == "__main__":
                 )
 
                 # print time, loss and accuracy
-                if should_print or should_test:
+                if (should_print or should_test) and not args.enable_memory_profiling:
                     gT = 1000.0 * total_time / total_iter if args.print_time else -1
                     total_time = 0
 
@@ -1304,9 +1308,9 @@ if __name__ == "__main__":
         print("inputs", all_inputs)
 
         # create dynamic_axis dictionaries
-        do_inputs = [{'offsets': {1 : 'batch_size' }}] if torch.is_tensor(lS_o_onnx) else [{"offsets_"+str(i) :{0 : 'batch _size'}} for i in range(len(lS_o_onnx))]
-        di_inputs = [{'indices': {1 : 'batch_size' }}] if torch.is_tensor(lS_i_onnx) else [{"indices_"+str(i) :{0 : 'batch _size'}} for i in range(len(lS_i_onnx))]
-        dynamic_axes = {'dense_x' : {0 : 'batch _size'}, 'pred' : {0 : 'batch_size'}}
+        do_inputs = [{'offsets': {1 : 'batch_size' }}] if torch.is_tensor(lS_o_onnx) else [{"offsets_"+str(i) :{0 : 'batch_size'}} for i in range(len(lS_o_onnx))]
+        di_inputs = [{'indices': {1 : 'batch_size' }}] if torch.is_tensor(lS_i_onnx) else [{"indices_"+str(i) :{0 : 'batch_size'}} for i in range(len(lS_i_onnx))]
+        dynamic_axes = {'dense_x' : {0 : 'batch_size'}, 'pred' : {0 : 'batch_size'}}
         for do in do_inputs:
             dynamic_axes.update(do)
         for di in di_inputs:
