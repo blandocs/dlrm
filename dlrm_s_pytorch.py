@@ -86,6 +86,7 @@ from tricks.qr_embedding_bag import QREmbeddingBag
 from tricks.md_embedding_bag import PrEmbeddingBag, md_solver
 
 import sklearn.metrics
+import random
 
 # from torchviz import make_dot
 # import torch.nn.functional as Functional
@@ -264,6 +265,17 @@ class DLRM_Net(nn.Module):
                 self.emb_l = self.create_emb(m_spa, ln_emb)
             self.bot_l = self.create_mlp(ln_bot, sigmoid_bot)
             self.top_l = self.create_mlp(ln_top, sigmoid_top)
+        
+        if args.ouput_memory_traces:
+            # dict: cumulative counts in embedding tables.
+            self.emb_cumulative_num = {}
+            cumulative_num = 0
+            for i in range(len(self.emb_l)):
+                self.emb_cumulative_num[i] = cumulative_num
+                cumulative_num += int(self.emb_l[i].num_embeddings)
+
+            # Page Mapping Module On(random physical page) 
+            self.PPN_mapping = {}
 
     def apply_mlp(self, x, layers):
         # approach 1: use ModuleList
@@ -272,6 +284,35 @@ class DLRM_Net(nn.Module):
         # return x
         # approach 2: use Sequential container to wrap all layers
         return layers(x)
+    
+    def page_mapping_module(self, table_i, offset_i):
+        # assume 4B int, 32bit memory space, 4KB page table size(offset) -> 20bit page number index
+
+        offset_i = offset_i.item()
+        # change logical address to logical page number and page index.
+        global_offset_i = self.emb_cumulative_num[table_i] + offset_i
+        # print(self.emb_cumulative_num[table_i], offset_i)
+        logical_page_number = (global_offset_i * 4) // 2**12
+        page_offset = (global_offset_i * 4) % 2**12
+
+        # Off(Assume physical address is also contiguous)
+        if args.ouput_memory_traces == 'continuous':
+            physical_page_number = logical_page_number
+
+        # Page Mapping Module On(random physical page) 
+        elif args.ouput_memory_traces == 'random':
+            if logical_page_number in self.PPN_mapping.keys():
+                physical_page_number = self.PPN_mapping[logical_page_number]
+            else:
+                physical_page_number = random.randint(0, 2**20 - 1)  
+                self.PPN_mapping[logical_page_number] = physical_page_number
+        
+        physical_address = physical_page_number * 2**12 + page_offset
+        print("0x{:08x} R".format(physical_address))
+        trace_file = open('memory_trace.trace', 'a')
+        trace_file.write("0x{:08x} R\n".format(physical_address))
+        trace_file.close()
+
 
     def apply_emb(self, lS_o, lS_i, emb_l):
         # WARNING: notice that we are processing the batch at once. We implicitly
@@ -288,6 +329,9 @@ class DLRM_Net(nn.Module):
 
             if args.enable_memory_profiling:
                 print(f'TABLE {k} [{emb_l[k].num_embeddings} entries, {next(emb_l.parameters()).device}] <- READ', sparse_index_group_batch.detach().cpu().numpy())
+            if args.ouput_memory_traces:
+                for sparse_indices in sparse_index_group_batch:
+                    self.page_mapping_module(k, sparse_indices)
             # embedding lookup
             # We are using EmbeddingBag, which implicitly uses sum operator.
             # The embeddings are represented as tall matrices, with sum
@@ -600,6 +644,8 @@ if __name__ == "__main__":
 
     # My commands
     parser.add_argument("--enable-memory-profiling", action="store_true", default=False)
+    parser.add_argument("--ouput-memory-traces", choices=['random', 'continuous'], default=False)
+    
     args = parser.parse_args()
 
     if args.mlperf_logging:
