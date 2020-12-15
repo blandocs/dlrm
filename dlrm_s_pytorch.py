@@ -267,12 +267,28 @@ class DLRM_Net(nn.Module):
             self.top_l = self.create_mlp(ln_top, sigmoid_top)
         
         if args.ouput_memory_traces:
-            # dict: cumulative counts in embedding tables.
-            self.emb_cumulative_num = {}
-            cumulative_num = 0
-            for i in range(len(self.emb_l)):
-                self.emb_cumulative_num[i] = cumulative_num
-                cumulative_num += int(self.emb_l[i].num_embeddings)
+
+            if self.qr_flag:
+                # dict: cumulative counts in embedding tables.
+                self.emb_cumulative_num_q = {}
+                self.emb_cumulative_num_r = {}
+                cumulative_num_q = 0
+                cumulative_num_r = 0
+
+                for i in range(len(self.emb_l)):
+                    self.emb_cumulative_num_q[i] = cumulative_num_q
+                    cumulative_num_q += int(self.emb_l[i].num_embeddings[0])   
+                    self.emb_cumulative_num_r[i] = cumulative_num_r
+                    cumulative_num_r += int(self.emb_l[i].num_embeddings[1])                
+                self.cumulative_num_r = cumulative_num_r
+                self.cumulative_num_q = cumulative_num_q
+            else:
+                # dict: cumulative counts in embedding tables.
+                self.emb_cumulative_num = {}
+                cumulative_num = 0
+                for i in range(len(self.emb_l)):
+                    self.emb_cumulative_num[i] = cumulative_num
+                    cumulative_num += int(self.emb_l[i].num_embeddings)
 
             # Page Mapping Module On(random physical page) 
             self.PPN_mapping = {}
@@ -285,22 +301,31 @@ class DLRM_Net(nn.Module):
         # approach 2: use Sequential container to wrap all layers
         return layers(x)
     
-    def page_mapping_module(self, table_i, offset_i):
+    def page_mapping_module(self, table_i, offset_i, qr_mode=None):
         # assume 4B int, 32bit memory space, 4KB page table size(offset) -> 20bit page number index
-
         offset_i = offset_i.item()
         # change logical address to logical page number and page index.
-        global_offset_i = self.emb_cumulative_num[table_i] + offset_i
+        if self.qr_flag: # q1 r1 q2 r2 ... 
+            global_offset_i = self.emb_cumulative_num_q[table_i] + self.emb_cumulative_num_r[table_i] + offset_i
+            
+            if qr_mode == 'r':
+                global_offset_i += self.emb_l[table_i].num_embeddings[0]
+
+            save_name = f'memory_trace_qr_flag_{args.ouput_memory_traces}.trace'
+        else:
+            global_offset_i = self.emb_cumulative_num[table_i] + offset_i
+            save_name = f'memory_trace_{args.ouput_memory_traces}.trace'
+
         # print(self.emb_cumulative_num[table_i], offset_i)
         logical_page_number = (global_offset_i * 4) // 2**12
         page_offset = (global_offset_i * 4) % 2**12
 
         # Off(Assume physical address is also contiguous)
-        if args.ouput_memory_traces == 'continuous':
+        if 'continuous' == args.ouput_memory_traces:
             physical_page_number = logical_page_number
 
         # Page Mapping Module On(random physical page) 
-        elif args.ouput_memory_traces == 'random':
+        elif 'random' == args.ouput_memory_traces:
             if logical_page_number in self.PPN_mapping.keys():
                 physical_page_number = self.PPN_mapping[logical_page_number]
             else:
@@ -308,8 +333,8 @@ class DLRM_Net(nn.Module):
                 self.PPN_mapping[logical_page_number] = physical_page_number
         
         physical_address = physical_page_number * 2**12 + page_offset
-        # print("0x{:08x} R".format(physical_address))
-        trace_file = open('memory_trace.trace', 'a')
+        print("0x{:08x} R".format(physical_address))
+        trace_file = open(save_name, 'a')
         trace_file.write("0x{:08x} R\n".format(physical_address))
         trace_file.close()
 
@@ -336,9 +361,19 @@ class DLRM_Net(nn.Module):
                     print(f'TABLE {k} [remainder {emb_l[k].num_embeddings[1]} entries, {next(emb_l.parameters()).device}] <- READ', r_i)
                 else:
                     print(f'TABLE {k} [{emb_l[k].num_embeddings} entries, {next(emb_l.parameters()).device}] <- READ', s_i_g)
+                    
             if args.ouput_memory_traces:
-                for sparse_indices in sparse_index_group_batch:
-                    self.page_mapping_module(k, sparse_indices)
+                s_i_g = sparse_index_group_batch.detach().cpu().numpy()
+                if args.qr_flag:
+                    q_i = s_i_g // self.qr_collisions
+                    r_i = s_i_g % self.qr_collisions                    
+                    for sparse_indices in q_i:
+                        self.page_mapping_module(k, sparse_indices, qr_mode='q')
+                    for sparse_indices in r_i:
+                        self.page_mapping_module(k, sparse_indices, qr_mode='r')                        
+                else:
+                    for sparse_indices in s_i_g:
+                        self.page_mapping_module(k, sparse_indices)
             # embedding lookup
             # We are using EmbeddingBag, which implicitly uses sum operator.
             # The embeddings are represented as tall matrices, with sum
