@@ -308,7 +308,7 @@ class DLRM_Net(nn.Module):
                 self.PPN_mapping[logical_page_number] = physical_page_number
         
         physical_address = physical_page_number * 2**12 + page_offset
-        print("0x{:08x} R".format(physical_address))
+        # print("0x{:08x} R".format(physical_address))
         trace_file = open('memory_trace.trace', 'a')
         trace_file.write("0x{:08x} R\n".format(physical_address))
         trace_file.close()
@@ -328,7 +328,14 @@ class DLRM_Net(nn.Module):
             sparse_offset_group_batch = lS_o[k]
 
             if args.enable_memory_profiling:
-                print(f'TABLE {k} [{emb_l[k].num_embeddings} entries, {next(emb_l.parameters()).device}] <- READ', sparse_index_group_batch.detach().cpu().numpy())
+                s_i_g = sparse_index_group_batch.detach().cpu().numpy()
+                if args.qr_flag:
+                    q_i = s_i_g // self.qr_collisions
+                    r_i = s_i_g % self.qr_collisions
+                    print(f'TABLE {k} [quotient {emb_l[k].num_embeddings[0]} entries, {next(emb_l.parameters()).device}] <- READ', q_i)
+                    print(f'TABLE {k} [remainder {emb_l[k].num_embeddings[1]} entries, {next(emb_l.parameters()).device}] <- READ', r_i)
+                else:
+                    print(f'TABLE {k} [{emb_l[k].num_embeddings} entries, {next(emb_l.parameters()).device}] <- READ', s_i_g)
             if args.ouput_memory_traces:
                 for sparse_indices in sparse_index_group_batch:
                     self.page_mapping_module(k, sparse_indices)
@@ -340,7 +347,6 @@ class DLRM_Net(nn.Module):
             V = E(sparse_index_group_batch, sparse_offset_group_batch)
 
             ly.append(V)
-        
         # print(ly)
         return ly
 
